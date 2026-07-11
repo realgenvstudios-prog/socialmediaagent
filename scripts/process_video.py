@@ -70,16 +70,25 @@ def _ydl_auth_args():
 def _ytdlp_client_attempts():
     """
     Ordered (extractor_args, extra_cli_args) pairs to try for YouTube downloads.
-    `tv_embedded` needs no cookies/proxy/PO-token at all as of writing (verified
-    against a real video: full DASH manifest up to 1080p, real segment download
-    confirmed). `web` + cookies/proxy is kept as a fallback in case YouTube
-    closes off tv_embedded the way it has closed off other clients before
-    (this codebase has been through android, ios, and OAuth2 for the same
-    reason) -- so a stale/expired YOUTUBE_COOKIES secret degrades to today's
-    known failure mode instead of nothing working at all.
+
+    `tv_embedded` needs no cookies/PO-token at all -- verified against a real
+    video from a clean residential IP: full DASH manifest up to 1080p, real
+    segment download confirmed. But GitHub Actions' shared datacenter IPs get
+    YouTube's "Sign in to confirm you're not a bot" challenge regardless of
+    which client is spoofed -- that's an IP-reputation problem, not a client
+    or cookie problem, so the second attempt keeps tv_embedded but adds the
+    residential proxy (fixes IP reputation) with no cookies (tv_embedded
+    doesn't use them). `web` + cookies/proxy is the last-resort fallback in
+    case YouTube closes off tv_embedded entirely, the way it has closed off
+    other clients before (this codebase has been through android, ios, and
+    OAuth2 for the same reason) -- so a stale/expired YOUTUBE_COOKIES secret
+    degrades to today's known failure mode instead of nothing working at all.
     """
+    proxy = os.environ.get("YTDLP_PROXY")
+    proxy_args = ["--proxy", proxy] if proxy else []
     return [
         ("youtube:player_client=tv_embedded", []),
+        ("youtube:player_client=tv_embedded", proxy_args),
         ("youtube:player_client=web", _ydl_auth_args()),
     ]
 
