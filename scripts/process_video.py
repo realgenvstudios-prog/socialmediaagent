@@ -535,7 +535,9 @@ CRITICAL: Output ONLY the raw JSON array containing EXACTLY 7 clips. Do not incl
   }}
 ]"""
 
+    import re
     raw = ""
+    clips = None
     for attempt in range(4):
         try:
             # Stream the response -- keeps connection alive on large prompts
@@ -545,22 +547,28 @@ CRITICAL: Output ONLY the raw JSON array containing EXACTLY 7 clips. Do not incl
                 messages=[{"role": "user", "content": prompt}],
             ) as stream:
                 raw = stream.get_final_text()
+
+            raw = raw.strip()
+            # Robust extraction: the real array always opens with '[' immediately
+            # followed by '{' (a clip object) -- anchor on that instead of the
+            # first '[' anywhere, which can land on a stray bracket earlier in
+            # the response (e.g. a citation-style marker) and produce a slice
+            # that isn't valid JSON.
+            m = re.search(r"\[\s*\{", raw)
+            start_idx = m.start() if m else raw.find("[")
+            end_idx = raw.rfind("]")
+            sliced = raw[start_idx:end_idx + 1] if start_idx != -1 and end_idx != -1 else raw
+
+            clips = json.loads(sliced)
             break
         except Exception as e:
             if attempt == 3:
+                print(f"  [select_clips] Giving up after 4 attempts ({e})")
+                print(f"  [select_clips] Raw response (first 1000 chars): {raw[:1000]!r}")
                 raise
             wait = 15 * (attempt + 1)
-            print(f"  Claude API attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
+            print(f"  Claude clip selection attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
             import time; time.sleep(wait)
-
-    raw = raw.strip()
-    # Robust extraction: find the outermost JSON array regardless of any surrounding text
-    start_idx = raw.find("[")
-    end_idx = raw.rfind("]")
-    if start_idx != -1 and end_idx != -1:
-        raw = raw[start_idx:end_idx + 1]
-
-    clips = json.loads(raw)
     valid = []
     for c in clips:
         duration = c["end_seconds"] - c["start_seconds"]
