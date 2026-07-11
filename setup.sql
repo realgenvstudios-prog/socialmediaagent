@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS clip_selection_log (
     engagement_rate     FLOAT       DEFAULT 0,
     performance_tier    TEXT,
     clip_transcript     TEXT,
+    caption_variant     TEXT,
     analytics_updated_at TIMESTAMPTZ,
     created_at          TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (video_id, clip_index)
