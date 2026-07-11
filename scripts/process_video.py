@@ -58,9 +58,6 @@ def to_hhmmss(seconds):
 
 def _ydl_auth_args():
     args = []
-    proxy = os.environ.get("YTDLP_PROXY")
-    if proxy:
-        args += ["--proxy", proxy]
     cookies = os.environ.get("YOUTUBE_COOKIES_FILE")
     if cookies and os.path.exists(cookies):
         args += ["--cookies", cookies]
@@ -73,22 +70,18 @@ def _ytdlp_client_attempts():
 
     `tv_embedded` needs no cookies/PO-token at all -- verified against a real
     video from a clean residential IP: full DASH manifest up to 1080p, real
-    segment download confirmed. But GitHub Actions' shared datacenter IPs get
-    YouTube's "Sign in to confirm you're not a bot" challenge regardless of
-    which client is spoofed -- that's an IP-reputation problem, not a client
-    or cookie problem, so the second attempt keeps tv_embedded but adds the
-    residential proxy (fixes IP reputation) with no cookies (tv_embedded
-    doesn't use them). `web` + cookies/proxy is the last-resort fallback in
-    case YouTube closes off tv_embedded entirely, the way it has closed off
-    other clients before (this codebase has been through android, ios, and
-    OAuth2 for the same reason) -- so a stale/expired YOUTUBE_COOKIES secret
-    degrades to today's known failure mode instead of nothing working at all.
+    segment download confirmed. `web` + cookies is the fallback in case
+    YouTube closes off tv_embedded entirely, the way it has closed off other
+    clients before (this codebase has been through android, ios, and OAuth2
+    for the same reason) -- so a stale/expired YOUTUBE_COOKIES secret degrades
+    to today's known failure mode instead of nothing working at all.
+
+    No proxy: the YTDLP_PROXY service this used to route through was an unpaid/
+    inactive account returning 402 Payment Required, not a working residential
+    proxy -- it was making things worse, not fixing IP reputation. Removed.
     """
-    proxy = os.environ.get("YTDLP_PROXY")
-    proxy_args = ["--proxy", proxy] if proxy else []
     return [
         ("youtube:player_client=tv_embedded", []),
-        ("youtube:player_client=tv_embedded", proxy_args),
         ("youtube:player_client=web", _ydl_auth_args()),
     ]
 
