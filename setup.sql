@@ -119,11 +119,21 @@ CREATE TABLE IF NOT EXISTS clip_performance (
 CREATE INDEX IF NOT EXISTS idx_clip_performance_clip
     ON clip_performance(clip_queue_id, measured_at);
 
--- Channel intelligence brief — single row updated daily by update_intelligence.py
+-- Channel intelligence brief — single row updated weekly (Mondays) by update_intelligence.py
 -- Injected into every Claude clip selection prompt via process_video.py
 CREATE TABLE IF NOT EXISTS channel_intelligence (
     id         TEXT        PRIMARY KEY DEFAULT 'singleton',
     summary    TEXT,
     stats      JSONB,
     updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Insert-only audit trail of every weekly strategy review (channel_intelligence
+-- above only ever keeps the latest one) — lets you see how the brief and its
+-- "FOR TED" recommendations evolved over time.
+CREATE TABLE IF NOT EXISTS intelligence_history (
+    id         UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
+    summary    TEXT,
+    stats      JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );

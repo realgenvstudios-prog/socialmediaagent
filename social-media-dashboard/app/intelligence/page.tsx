@@ -251,14 +251,35 @@ export default async function IntelligencePage() {
         </section>
       )}
 
+      {/* For-Ted recommendations -- human review, never auto-applied */}
+      {analysisSections.filter(s => s.heading.toLowerCase().includes("for ted")).map((s, i) => (
+        <section key={`recs-${i}`} style={{
+          marginBottom: "4rem",
+          border: "1px solid #f59e0b",
+          borderLeft: "3px solid #f59e0b",
+          borderRadius: "2px",
+          padding: "1.5rem 1.75rem",
+          background: "rgba(245, 158, 11, 0.06)",
+        }}>
+          <p style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.14em", textTransform: "uppercase", color: "#f59e0b", marginBottom: "1rem" }}>
+            For Ted &middot; Recommended Actions &middot; Not Auto-Applied
+          </p>
+          {s.paragraphs.map((p, j) => (
+            <p key={j} style={{ fontSize: "14px", color: "var(--text)", lineHeight: 1.8, margin: 0, marginBottom: j < s.paragraphs.length - 1 ? "1rem" : 0 }}>
+              {p}
+            </p>
+          ))}
+        </section>
+      ))}
+
       {/* Analysis */}
-      {analysisSections.length > 0 && (
+      {analysisSections.filter(s => !s.heading.toLowerCase().includes("for ted")).length > 0 && (
         <section>
           <p style={{ fontSize: "11px", fontWeight: 500, letterSpacing: "0.14em", textTransform: "uppercase", color: "var(--faint)", marginBottom: "2rem" }}>
             Channel Insights
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: "0" }}>
-            {analysisSections.map((s, i) => (
+            {analysisSections.filter(s => !s.heading.toLowerCase().includes("for ted")).map((s, i) => (
               <div key={i} style={{ borderTop: "1px solid var(--border)", paddingTop: "1.75rem", paddingBottom: "1.75rem" }}>
                 {s.heading && (
                   <p style={{ fontSize: "12px", fontWeight: 600, color: "var(--text)", marginBottom: "0.6rem", textTransform: "capitalize" }}>

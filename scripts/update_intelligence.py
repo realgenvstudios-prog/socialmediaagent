@@ -12,7 +12,7 @@ inject it into the clip-selection prompt.
 import os
 import json
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from dotenv import load_dotenv
 
@@ -29,6 +29,14 @@ from supabase import create_client
 
 sb     = create_client(SUPABASE_URL, SUPABASE_KEY)
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Stable anchor repeated in every weekly brief -- not just prose scene-setting,
+# the actual thing "is the current strategy working?" gets checked against.
+GOAL = (
+    "Grow real reach and followers for the Konnected Minds Podcast (Ghana/Africa "
+    "entrepreneurship audience) across TikTok, Instagram Reels, YouTube Shorts, and "
+    "Facebook Reels -- not just rack up per-clip views, but build a returning audience."
+)
 
 
 # ── Zernio helpers ─────────────────────────────────────────────────────────────
@@ -152,6 +160,18 @@ def save_intelligence(summary: str, stats: dict) -> None:
         on_conflict="id",
     ).execute()
     print("  Saved channel intelligence to Supabase.")
+
+    # Insert-only audit trail so the brief/recommendations' evolution over time
+    # is visible, not just the latest snapshot (which the line above overwrites).
+    try:
+        sb.table("intelligence_history").insert({
+            "summary": summary,
+            "stats":   stats,
+        }).execute()
+        print("  Logged this review to intelligence_history.")
+    except Exception as e:
+        print(f"  Warning: could not log to intelligence_history ({e}) -- "
+              f"run scripts/migrate_add_intelligence_history.py if not done yet.")
 
 
 # ── YouTube Analytics ──────────────────────────────────────────────────────────
@@ -524,6 +544,75 @@ def build_decision_history(zernio_map: dict[str, dict]) -> str:
         return ""
 
 
+def build_variant_analysis(zernio_map: dict[str, dict]) -> str:
+    """
+    Correlate caption_variant ("clean" vs "dynamic", see cut_and_subtitle in
+    process_video.py) with real view performance -- the A/B test set up in the
+    presentation phase. Returns "" until enough posted+synced data exists on
+    both sides to say anything meaningful.
+    """
+    try:
+        rows = (
+            sb.table("clip_selection_log")
+            .select("video_id, clip_index, caption_variant")
+            .not_.is_("caption_variant", "null")
+            .execute()
+        ).data or []
+
+        if len(rows) < 10:
+            return ""
+
+        queue_rows = (
+            sb.table("clip_queue")
+            .select("video_id, clip_index, platform, zernio_post_id")
+            .eq("status", "posted")
+            .not_.is_("zernio_post_id", "null")
+            .execute()
+        ).data or []
+
+        queue_by_clip: dict[tuple, list] = defaultdict(list)
+        for qrow in queue_rows:
+            key = (qrow["video_id"], qrow["clip_index"])
+            zpost = zernio_map.get(qrow.get("zernio_post_id") or "")
+            analytics = (zpost or {}).get("analytics") or {}
+            if analytics.get("views"):
+                queue_by_clip[key].append({
+                    "platform": qrow["platform"],
+                    "views":    analytics.get("views") or 0,
+                })
+
+        variant_stats:    dict[str, list] = defaultdict(list)
+        platform_variant: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+
+        for r in rows:
+            key = (r["video_id"], r["clip_index"])
+            variant = r["caption_variant"]
+            for pdata in queue_by_clip.get(key, []):
+                variant_stats[variant].append(pdata["views"])
+                platform_variant[pdata["platform"]][variant].append(pdata["views"])
+
+        if len(variant_stats) < 2:
+            return ""
+
+        lines = [f"CAPTION STYLE A/B RESULTS ({len(rows)} clips tagged, clean vs dynamic):"]
+        for variant, vl in sorted(variant_stats.items(), key=lambda x: -sum(x[1]) / len(x[1])):
+            lines.append(f"  {variant}: {round(sum(vl)/len(vl))} avg views ({len(vl)} synced posts)")
+
+        if platform_variant:
+            lines.append("\nPER-PLATFORM:")
+            for platform in ["tiktok", "instagram", "youtube", "facebook"]:
+                if platform not in platform_variant or len(platform_variant[platform]) < 2:
+                    continue
+                lines.append(f"\n  {platform.upper()}:")
+                for variant, vl in sorted(platform_variant[platform].items(), key=lambda x: -sum(x[1]) / len(x[1])):
+                    lines.append(f"    {variant}: {round(sum(vl)/len(vl))} avg views ({len(vl)} posts)")
+
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"  Warning: could not build variant analysis: {e}")
+        return ""
+
+
 # ── Content pattern analysis ───────────────────────────────────────────────────
 
 def build_content_analysis(zernio_map: dict[str, dict]) -> str:
@@ -746,6 +835,66 @@ def build_caption_analysis(rows: list[dict]) -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def build_goal_progress(rows: list[dict]) -> str:
+    """
+    Week-over-week comparison so the brief can state whether GOAL is actually
+    being met right now -- growing or flat/declining -- not just describe
+    all-time patterns. `rows` is build_performance_dataset()'s output, which
+    already carries posted_at (YYYY-MM-DD), platform, views, engagement_rate.
+    """
+    if not rows:
+        return ""
+
+    today            = datetime.now(timezone.utc).date()
+    this_week_start  = today - timedelta(days=7)
+    last_week_start  = today - timedelta(days=14)
+
+    def in_range(date_str, start, end):
+        try:
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            return start <= d < end
+        except Exception:
+            return False
+
+    this_week = [r for r in rows if in_range(r.get("posted_at", ""), this_week_start, today + timedelta(days=1))]
+    last_week = [r for r in rows if in_range(r.get("posted_at", ""), last_week_start, this_week_start)]
+
+    if not this_week and not last_week:
+        return ""
+
+    def platform_avgs(subset):
+        by_platform: dict[str, list] = defaultdict(list)
+        for r in subset:
+            by_platform[r["platform"]].append(r)
+        out = {}
+        for p, rs in by_platform.items():
+            views = [r["views"] for r in rs]
+            out[p] = {"avg_views": sum(views) / len(views) if views else 0, "count": len(rs)}
+        return out
+
+    this = platform_avgs(this_week)
+    last = platform_avgs(last_week)
+
+    lines = [f"GOAL PROGRESS (this week vs last week, {len(this_week)} vs {len(last_week)} synced posts):"]
+    for platform in ["tiktok", "instagram", "youtube", "facebook"]:
+        t, l = this.get(platform), last.get(platform)
+        if not t and not l:
+            continue
+        if t and l and l["avg_views"] > 0:
+            delta_pct = round((t["avg_views"] - l["avg_views"]) / l["avg_views"] * 100)
+            sign = "+" if delta_pct >= 0 else ""
+            lines.append(
+                f"  {platform.upper()}: {round(t['avg_views'])} avg views this week vs "
+                f"{round(l['avg_views'])} avg views last week ({sign}{delta_pct}%), {t['count']} posts this week"
+            )
+        elif t:
+            lines.append(f"  {platform.upper()}: {round(t['avg_views'])} avg views this week ({t['count']} posts) -- no synced data last week to compare yet")
+        elif l:
+            lines.append(f"  {platform.upper()}: no synced posts this week yet (last week: {round(l['avg_views'])} avg views, {l['count']} posts)")
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def build_growth_analysis() -> str:
     """
     Reads clip_performance time-series snapshots to find growth patterns.
@@ -809,6 +958,8 @@ def analyse_with_claude(
     content_analysis: str,
     growth_analysis: str,
     youtube_analytics: str = "",
+    goal_progress: str = "",
+    variant_analysis: str = "",
 ) -> str:
     """Send all performance data to Claude for strategic analysis."""
     if not rows:
@@ -888,17 +1039,21 @@ def analyse_with_claude(
     content_block    = f"\n{content_analysis}\n"                                              if content_analysis   else ""
     growth_block     = f"\n{growth_analysis}\n"                                               if growth_analysis    else ""
     youtube_block    = f"\n{youtube_analytics}\n"                                             if youtube_analytics  else ""
+    goal_block       = f"\n{goal_progress}\n"                                                 if goal_progress      else ""
+    variant_block    = f"\n{variant_analysis}\n"                                              if variant_analysis   else ""
 
     prompt = f"""You are an expert social media strategist and content agent for the Konnected Minds Podcast (Ghana-based business/entrepreneurship channel posting short-form clips to TikTok, Instagram Reels, YouTube Shorts, and Facebook Reels).
+
+GOAL (this is what every judgement below must be checked against): {GOAL}
 
 Your role is not just to analyse past performance — you must act as a smart, proactive social media manager who understands what it takes to grow an audience, increase followers, and build real reach, not just post-level engagement.
 
 Below is everything you need to know:
 
 {dataset_text}
-{platform_text}{follower_text}{decision_block}{timing_block}{caption_block}{content_block}{growth_block}{youtube_block}{algorithm_block}
+{platform_text}{follower_text}{goal_block}{variant_block}{decision_block}{timing_block}{caption_block}{content_block}{growth_block}{youtube_block}{algorithm_block}
 
-Write a CHANNEL INTELLIGENCE BRIEF that the clip selection AI will read before picking and captioning clips from a new episode. This brief must make the AI smarter — not just reactive to past data, but genuinely strategic about growth.
+Write a WEEKLY STRATEGY REVIEW that the clip selection AI will read before picking and captioning clips from a new episode. This brief must make the AI smarter — not just reactive to past data, but genuinely strategic about growth toward the GOAL above.
 
 Structure your brief around these sections:
 
@@ -918,13 +1073,20 @@ Structure your brief around these sections:
 
 8. WHAT TO AVOID — Specific traits of the lowest performers. What hooks, topics, caption styles, and clip structures are actively hurting performance?
 
-9. ACTIONABLE RULES — 10 to 12 specific, concrete rules for clip selection, cutting decisions, AND caption writing. Each rule must be direct and immediately applicable (e.g. "On TikTok, always prioritise confession hooks — they average 2x the channel's TikTok mean. Never use advice hooks as openers on TikTok.").
+9. ACTIONABLE RULES — 10 to 12 specific, concrete rules for clip selection, cutting decisions, AND caption writing. Each rule must be direct and immediately applicable (e.g. "On TikTok, always prioritise confession hooks — they average 2x the channel's TikTok mean. Never use advice hooks as openers on TikTok."). These rules are fed automatically into the clip-selection AI's prompt every run.
 
-Be specific, data-driven, and opinionated. Reference real numbers and real hook examples from the data. Write as if you are briefing a junior social media manager — clear, direct, no fluff."""
+10. IS THE CURRENT STRATEGY WORKING? — Using the GOAL PROGRESS data above (this week vs last week, per platform), give an explicit verdict per platform: growing, flat, or declining, with the actual numbers as evidence. Do not soften this with vibes — if a platform is flat or declining, say so plainly. If there isn't enough week-over-week data yet, say that plainly too instead of guessing.
+
+11. FOR TED — RECOMMENDED ACTIONS (human review, not auto-applied) — This section is fundamentally different from section 9: rules in section 9 are read automatically by the clip-selection AI every run. This section is NOT auto-applied to anything — it is written for a human to read and decide on. Write 3-5 specific, concrete proposed changes to the pipeline or strategy itself (not clip-picking rules), each grounded in real evidence from above. Examples of the KIND of thing that belongs here (use real numbers from the data, not these exact examples): "Consider shifting the caption A/B split toward the dynamic style — it's averaging Nx more views after M posts, though the sample is still small." / "TikTok has been flat for 2 weeks running despite steady posting — consider investigating before increasing volume there." / "Engagement per post is declining as posting volume increases — consider reducing cadence." If nothing rises to the level of a real recommendation yet (not enough data, or nothing conclusive), say so plainly rather than inventing filler.
+    FORMATTING FOR THIS SECTION ONLY: do NOT start each recommendation with a number and period (e.g. "1. ", "2. ") -- write each as its own short bolded label followed by a colon and the explanation, as a plain paragraph (e.g. "**Facebook caption format:** ..."). This is a strict technical requirement of the rendering system this feeds into, not a style preference.
+
+Be specific, data-driven, and opinionated. Reference real numbers and real hook examples from the data. Write as if you are briefing a junior social media manager — clear, direct, no fluff.
+
+LENGTH BUDGET — this is an 11-section brief and you have a finite output budget. Keep sections 1-8 tight (roughly 100-150 words of prose each; data tables/examples don't count against this). Sections 9, 10, and 11 are the most operationally important parts of this weekly review — never let earlier sections run long enough that you run out of room before reaching them. If you're running low on space, compress sections 1-8 further rather than cutting 9-11 short."""
 
     msg = claude.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=2200,
+        max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     )
     return msg.content[0].text
@@ -933,6 +1095,11 @@ Be specific, data-driven, and opinionated. Reference real numbers and real hook 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--force", action="store_true", help="Run the full weekly review now, bypassing the Monday gate")
+    args = parser.parse_args()
+
     print("Fetching analytics...")
     zernio_map = fetch_zernio_all_posts()
     print(f"  {len(zernio_map)} posts fetched.")
@@ -955,21 +1122,22 @@ def main():
         print("  Not enough synced data yet — skipping analysis.")
         return
 
-    # Skip if brief is recent and dataset hasn't grown significantly
+    # Full weekly strategy review runs Monday mornings (per the intended cadence
+    # of this being a *weekly* review, not a running stat dump) -- unless this
+    # is the very first review ever (bootstrap) or --force is passed.
+    is_monday = datetime.now(timezone.utc).weekday() == 0
     try:
         existing = sb.table("channel_intelligence").select("stats,updated_at").eq("id", "singleton").maybe_single().execute()
-        if existing.data:
-            prev_count = (existing.data.get("stats") or {}).get("clips_analysed", 0)
-            updated_at = existing.data.get("updated_at", "")
-            if updated_at:
-                age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(updated_at.replace("Z", "+00:00"))).days
-                new_clips = len(rows) - prev_count
-                if age_days < 3 and new_clips < 10:
-                    print(f"  Brief is {age_days}d old with only {new_clips} new clips — skipping.")
-                    return
-                print(f"  Brief is {age_days}d old, {new_clips} new clips — regenerating.")
+        has_existing_review = bool(existing.data)
     except Exception:
-        pass
+        has_existing_review = False
+
+    if not args.force and has_existing_review and not is_monday:
+        print(f"  Not Monday (today is {datetime.now(timezone.utc).strftime('%A')}) and a review already "
+              f"exists -- skipping full weekly review. Use --force to run anyway.")
+        return
+    print(f"  Running full weekly review "
+          f"({'forced' if args.force else 'first-ever review' if not has_existing_review else 'Monday'}).")
 
     # Gather all intelligence inputs
     print("Fetching YouTube Analytics...")
@@ -980,6 +1148,12 @@ def main():
 
     print("Building decision history...")
     decision_history = build_decision_history(zernio_map)
+
+    print("Building caption style A/B analysis...")
+    variant_analysis = build_variant_analysis(zernio_map)
+
+    print("Building goal progress (this week vs last week)...")
+    goal_progress = build_goal_progress(rows)
 
     print("Building timing analysis...")
     timing_text = build_timing_analysis(rows)
@@ -1004,7 +1178,11 @@ def main():
     }
 
     print("Sending to Claude for strategic analysis...")
-    summary = analyse_with_claude(rows, decision_history, algorithm_research, timing_text, caption_text, follower_data, content_analysis, growth_analysis, youtube_analytics)
+    summary = analyse_with_claude(
+        rows, decision_history, algorithm_research, timing_text, caption_text,
+        follower_data, content_analysis, growth_analysis, youtube_analytics,
+        goal_progress=goal_progress, variant_analysis=variant_analysis,
+    )
     print("  Analysis complete.")
     print("\n--- INTELLIGENCE BRIEF PREVIEW ---")
     print(summary[:600] + ("..." if len(summary) > 600 else ""))
